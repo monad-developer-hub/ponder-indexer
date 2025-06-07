@@ -1,12 +1,13 @@
 import { 
   blocks, 
+  transactions,
   contractUsage, 
   walletContractInteractions, 
   walletGasUsage, 
   monTransfers, 
   monWalletActivity 
 } from "ponder:schema";
-import { sql, desc, asc, gte, and, eq } from "ponder";
+import { sql, desc, asc, gte, and, eq, or } from "ponder";
 
 // Helper: Get timestamp for 24 hours ago
 const get24hAgo = () => BigInt(Math.floor(Date.now() / 1000) - 24 * 60 * 60);
@@ -379,4 +380,160 @@ export async function getWalletDetails(db: any, walletAddress: string, days = 7)
     gas: gasUsage[0],
     mon: monActivity[0],
   };
+}
+
+// ==============================================
+// 💳 INDIVIDUAL TRANSACTION QUERIES
+// ==============================================
+
+// 15. Get Recent Transactions (for Transaction Log)
+export async function getRecentTransactions(db: any, limit = 50) {
+  return await db
+    .select({
+      hash: transactions.hash,
+      blockNumber: transactions.blockNumber,
+      blockTimestamp: transactions.blockTimestamp,
+      transactionIndex: transactions.transactionIndex,
+      fromAddress: transactions.fromAddress,
+      toAddress: transactions.toAddress,
+      value: transactions.value,
+      valueInMon: sql<number>`${transactions.value}::float / 1e18`,
+      gasUsed: transactions.gasUsed,
+      gasPrice: transactions.gasPrice,
+      transactionType: transactions.transactionType,
+      methodSignature: transactions.methodSignature,
+      success: transactions.success,
+      contractAddress: transactions.contractAddress,
+    })
+    .from(transactions)
+    .orderBy(desc(transactions.blockTimestamp), desc(transactions.transactionIndex))
+    .limit(limit);
+}
+
+// 16. Get Transactions by Block Number
+export async function getTransactionsByBlock(db: any, blockNumber: bigint) {
+  return await db
+    .select({
+      hash: transactions.hash,
+      transactionIndex: transactions.transactionIndex,
+      fromAddress: transactions.fromAddress,
+      toAddress: transactions.toAddress,
+      value: transactions.value,
+      valueInMon: sql<number>`${transactions.value}::float / 1e18`,
+      gasUsed: transactions.gasUsed,
+      gasPrice: transactions.gasPrice,
+      transactionType: transactions.transactionType,
+      methodSignature: transactions.methodSignature,
+      success: transactions.success,
+      contractAddress: transactions.contractAddress,
+    })
+    .from(transactions)
+    .where(eq(transactions.blockNumber, blockNumber))
+    .orderBy(asc(transactions.transactionIndex));
+}
+
+// 17. Get Transactions by Wallet Address
+export async function getTransactionsByWallet(db: any, walletAddress: string, limit = 50) {
+  return await db
+    .select({
+      hash: transactions.hash,
+      blockNumber: transactions.blockNumber,
+      blockTimestamp: transactions.blockTimestamp,
+      transactionIndex: transactions.transactionIndex,
+      fromAddress: transactions.fromAddress,
+      toAddress: transactions.toAddress,
+      value: transactions.value,
+      valueInMon: sql<number>`${transactions.value}::float / 1e18`,
+      gasUsed: transactions.gasUsed,
+      gasPrice: transactions.gasPrice,
+      transactionType: transactions.transactionType,
+      methodSignature: transactions.methodSignature,
+      success: transactions.success,
+      contractAddress: transactions.contractAddress,
+      direction: sql<string>`CASE 
+        WHEN ${transactions.fromAddress} = ${walletAddress} THEN 'sent'
+        WHEN ${transactions.toAddress} = ${walletAddress} THEN 'received'
+        ELSE 'unknown'
+      END`,
+    })
+    .from(transactions)
+    .where(
+      or(
+        eq(transactions.fromAddress, walletAddress as `0x${string}`),
+        eq(transactions.toAddress, walletAddress as `0x${string}`)
+      )
+    )
+    .orderBy(desc(transactions.blockTimestamp), desc(transactions.transactionIndex))
+    .limit(limit);
+}
+
+// 18. Get Transaction by Hash
+export async function getTransactionByHash(db: any, hash: string) {
+  const result = await db
+    .select({
+      hash: transactions.hash,
+      blockNumber: transactions.blockNumber,
+      blockTimestamp: transactions.blockTimestamp,
+      transactionIndex: transactions.transactionIndex,
+      fromAddress: transactions.fromAddress,
+      toAddress: transactions.toAddress,
+      value: transactions.value,
+      valueInMon: sql<number>`${transactions.value}::float / 1e18`,
+      gasUsed: transactions.gasUsed,
+      gasPrice: transactions.gasPrice,
+      gasLimit: transactions.gasLimit,
+      transactionType: transactions.transactionType,
+      methodSignature: transactions.methodSignature,
+      inputData: transactions.inputData,
+      success: transactions.success,
+      nonce: transactions.nonce,
+      contractAddress: transactions.contractAddress,
+    })
+    .from(transactions)
+    .where(eq(transactions.hash, hash as `0x${string}`))
+    .limit(1);
+    
+  return result[0] || null;
+}
+
+// 19. Get Transactions by Type
+export async function getTransactionsByType(db: any, txType: string, limit = 50) {
+  return await db
+    .select({
+      hash: transactions.hash,
+      blockNumber: transactions.blockNumber,
+      blockTimestamp: transactions.blockTimestamp,
+      fromAddress: transactions.fromAddress,
+      toAddress: transactions.toAddress,
+      value: transactions.value,
+      valueInMon: sql<number>`${transactions.value}::float / 1e18`,
+      gasUsed: transactions.gasUsed,
+      transactionType: transactions.transactionType,
+      methodSignature: transactions.methodSignature,
+      contractAddress: transactions.contractAddress,
+    })
+    .from(transactions)
+    .where(eq(transactions.transactionType, txType))
+    .orderBy(desc(transactions.blockTimestamp), desc(transactions.transactionIndex))
+    .limit(limit);
+}
+
+// 20. Get Transactions by Contract Address
+export async function getTransactionsByContract(db: any, contractAddress: string, limit = 50) {
+  return await db
+    .select({
+      hash: transactions.hash,
+      blockNumber: transactions.blockNumber,
+      blockTimestamp: transactions.blockTimestamp,
+      fromAddress: transactions.fromAddress,
+      value: transactions.value,
+      valueInMon: sql<number>`${transactions.value}::float / 1e18`,
+      gasUsed: transactions.gasUsed,
+      transactionType: transactions.transactionType,
+      methodSignature: transactions.methodSignature,
+    })
+    .from(transactions)
+    .where(eq(transactions.contractAddress, contractAddress as `0x${string}`))
+    .orderBy(desc(transactions.blockTimestamp), desc(transactions.transactionIndex))
+    .limit(limit);
 } 

@@ -1,5 +1,5 @@
 import { ponder } from "ponder:registry";
-import { blocks, contractUsage, walletContractInteractions, walletGasUsage, monTransfers, monWalletActivity } from "ponder:schema";
+import { blocks, transactions, contractUsage, walletContractInteractions, walletGasUsage, monTransfers, monWalletActivity } from "ponder:schema";
 
 // Efficient transaction type classifier based on method signatures only
 function classifyTransactionByMethodSig(input: string): string {
@@ -103,9 +103,9 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
     other: 0,
   };
   
-  const transactions = fullBlock.transactions || [];
-  for (let i = 0; i < transactions.length; i++) {
-    const tx = transactions[i];
+  const txList = fullBlock.transactions || [];
+  for (let i = 0; i < txList.length; i++) {
+    const tx = txList[i];
     if (!tx) continue;
     
     const input = tx.input || "0x";
@@ -224,6 +224,26 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
         contractsInteracted: contractsSet,
       });
     }
+
+    // Store individual transaction details
+    await db.insert(transactions).values({
+      hash: tx.hash as `0x${string}`,
+      blockNumber: block.number,
+      blockTimestamp: block.timestamp,
+      transactionIndex: i,
+      fromAddress: tx.from as `0x${string}`,
+      toAddress: (tx.to || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+      value: monAmount,
+      gasUsed: gasUsed,
+      gasPrice: BigInt(tx.gasPrice || 0),
+      gasLimit: BigInt(tx.gas || 0),
+      transactionType: txType,
+      methodSignature: input.slice(0, 10),
+      inputData: input.length > 1000 ? input.slice(0, 1000) + "..." : input, // Truncate very long input data
+      success: true, // Assume success for now (we'd need receipt to determine this)
+      nonce: BigInt(tx.nonce || 0),
+      contractAddress: (contractAddress || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+    });
   }
   
   const currentTime = new Date().toISOString();

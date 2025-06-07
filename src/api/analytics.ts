@@ -309,6 +309,175 @@ app.get("/wallet/:address", async (c) => {
 });
 
 // ==============================================
+// 💳 INDIVIDUAL TRANSACTION ENDPOINTS
+// ==============================================
+
+// Get recent transactions (for Transaction Log interface)
+app.get("/transactions/recent", async (c) => {
+  try {
+    const limit = parseInt(c.req.query("limit") || "50");
+    const result = await queries.getRecentTransactions(db, limit);
+    return c.json({
+      success: true,
+      data: result,
+      meta: {
+        description: "Recent transactions across all blocks",
+        limit,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return c.json({ success: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+// Get transactions by block number
+app.get("/transactions/block/:blockNumber", async (c) => {
+  try {
+    const blockNumber = BigInt(c.req.param("blockNumber"));
+    const result = await queries.getTransactionsByBlock(db, blockNumber);
+    return c.json({
+      success: true,
+      data: result,
+      meta: {
+        description: `Transactions in block ${blockNumber}`,
+        blockNumber: blockNumber.toString(),
+        count: result.length,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return c.json({ success: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+// Get transactions by wallet address
+app.get("/transactions/wallet/:address", async (c) => {
+  try {
+    const address = c.req.param("address");
+    const limit = parseInt(c.req.query("limit") || "50");
+    
+    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      return c.json({ 
+        success: false, 
+        error: "Invalid wallet address format" 
+      }, 400);
+    }
+    
+    const result = await queries.getTransactionsByWallet(db, address, limit);
+    return c.json({
+      success: true,
+      data: result,
+      meta: {
+        description: `Transactions for wallet ${address}`,
+        address,
+        limit,
+        count: result.length,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return c.json({ success: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+// Get transaction by hash
+app.get("/transactions/:hash", async (c) => {
+  try {
+    const hash = c.req.param("hash");
+    
+    if (!hash || !/^0x[a-fA-F0-9]{64}$/.test(hash)) {
+      return c.json({ 
+        success: false, 
+        error: "Invalid transaction hash format" 
+      }, 400);
+    }
+    
+    const result = await queries.getTransactionByHash(db, hash);
+    
+    if (!result) {
+      return c.json({ 
+        success: false, 
+        error: "Transaction not found" 
+      }, 404);
+    }
+    
+    return c.json({
+      success: true,
+      data: result,
+      meta: {
+        description: `Transaction details for ${hash}`,
+        hash,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return c.json({ success: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+// Get transactions by type
+app.get("/transactions/type/:type", async (c) => {
+  try {
+    const txType = c.req.param("type");
+    const limit = parseInt(c.req.query("limit") || "50");
+    
+    const validTypes = ["transfer", "swap", "mint", "burn", "stake", "other"];
+    if (!validTypes.includes(txType)) {
+      return c.json({ 
+        success: false, 
+        error: `Invalid transaction type. Valid types: ${validTypes.join(", ")}` 
+      }, 400);
+    }
+    
+    const result = await queries.getTransactionsByType(db, txType, limit);
+    return c.json({
+      success: true,
+      data: result,
+      meta: {
+        description: `${txType} transactions`,
+        type: txType,
+        limit,
+        count: result.length,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return c.json({ success: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+// Get transactions by contract address
+app.get("/transactions/contract/:address", async (c) => {
+  try {
+    const address = c.req.param("address");
+    const limit = parseInt(c.req.query("limit") || "50");
+    
+    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      return c.json({ 
+        success: false, 
+        error: "Invalid contract address format" 
+      }, 400);
+    }
+    
+    const result = await queries.getTransactionsByContract(db, address, limit);
+    return c.json({
+      success: true,
+      data: result,
+      meta: {
+        description: `Transactions for contract ${address}`,
+        address,
+        limit,
+        count: result.length,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return c.json({ success: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+  }
+});
+
+// ==============================================
 // 📋 API DOCUMENTATION ENDPOINT
 // ==============================================
 
@@ -342,6 +511,14 @@ app.get("/", async (c) => {
       lookups: {
         "/contract/:address": "Get detailed contract analytics",
         "/wallet/:address": "Get detailed wallet analytics"
+      },
+      transactions: {
+        "/transactions/recent": "Get recent transactions (for Transaction Log)",
+        "/transactions/block/:blockNumber": "Get all transactions in a specific block",
+        "/transactions/wallet/:address": "Get transactions for a specific wallet",
+        "/transactions/:hash": "Get transaction details by hash",
+        "/transactions/type/:type": "Get transactions by type (transfer, swap, mint, burn, stake, other)",
+        "/transactions/contract/:address": "Get transactions for a specific contract"
       }
     },
     parameters: {
@@ -349,12 +526,16 @@ app.get("/", async (c) => {
       "days": "Number of days to look back (default: 7)",
       "minTxs": "Minimum transactions for efficiency ranking (default: 100)"
     },
-    examples: {
-      "Most used contracts": "/analytics/contracts/most-used?limit=20",
-      "Top gas wallets": "/analytics/wallets/top-gas?limit=15",
-      "Contract details": "/analytics/contract/0x123...?days=30",
-      "Network overview": "/analytics/network/overview"
-    }
+          examples: {
+        "Most used contracts": "/analytics/contracts/most-used?limit=20",
+        "Top gas wallets": "/analytics/wallets/top-gas?limit=15",
+        "Contract details": "/analytics/contract/0x123...?days=30",
+        "Network overview": "/analytics/network/overview",
+        "Recent transactions": "/analytics/transactions/recent?limit=100",
+        "Wallet transactions": "/analytics/transactions/wallet/0x123...?limit=50",
+        "Transaction by hash": "/analytics/transactions/0xabc123...",
+        "Swap transactions": "/analytics/transactions/type/swap?limit=25"
+      }
   });
 });
 
