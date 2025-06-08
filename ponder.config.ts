@@ -14,7 +14,7 @@ export default createConfig({
   blocks: {
     monadBlocks: {
       chain: "monad_testnet",
-      startBlock: 20489449, // Start from a known existing block
+      startBlock: process.env.PONDER_START_BLOCK ? parseInt(process.env.PONDER_START_BLOCK) : 0, // Start from a known existing block
       interval: 1,
     },
   },
