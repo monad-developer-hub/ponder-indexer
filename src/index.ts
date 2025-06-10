@@ -1,5 +1,5 @@
 import { ponder } from "ponder:registry";
-import { blocks, transactions, contractUsage, walletContractInteractions, walletGasUsage, monTransfers, monWalletActivity } from "ponder:schema";
+import { eventEmitter } from './websocket';
 
 // Efficient transaction type classifier based on method signatures only
 function classifyTransactionByMethodSig(input: string): string {
@@ -43,7 +43,7 @@ function classifyTransactionByMethodSig(input: string): string {
 
 ponder.on("monadBlocks:block", async ({ event, context }) => {
   const { block } = event;
-  const { client, db } = context;
+  const { client } = context;
   
   // Get full block with transactions for analysis
   const fullBlock = await client.getBlock({
@@ -53,47 +53,7 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
   
   const transactionCount = fullBlock.transactions?.length || 0;
   
-  // Track contract usage (aggregated)
-  const contractStats = new Map<string, {
-    transactionCount: number;
-    gasUsed: bigint;
-    transactionType: string;
-  }>();
-  
-  // Track wallet-contract interactions
-  const walletContractStats = new Map<string, {
-    transactionCount: number;
-    gasUsed: bigint;
-    transactionType: string;
-  }>();
-  
-  // Track wallet gas usage (per wallet)
-  const walletGasStats = new Map<string, {
-    totalGasUsed: bigint;
-    transactionCount: number;
-    contractsInteracted: Set<string>;
-  }>();
-  
-  // Track MON transfers
-  const monTransfersList: Array<{
-    id: string;
-    transactionHash: string;
-    fromAddress: string;
-    toAddress: string;
-    amount: bigint;
-    gasUsed: bigint;
-  }> = [];
-  
-  // Track MON wallet activity
-  const monWalletStats = new Map<string, {
-    totalSent: bigint;
-    totalReceived: bigint;
-    transferCount: number;
-    sentCount: number;
-    receivedCount: number;
-  }>();
-  
-  // Analyze transaction types efficiently
+  // Track transaction type counts
   const txTypeCounts = {
     transfer: 0,
     swap: 0,
@@ -103,6 +63,26 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
     other: 0,
   };
   
+  // Emit block event
+  eventEmitter.emit({
+    type: 'block',
+    data: {
+      number: block.number,
+      hash: block.hash,
+      timestamp: block.timestamp,
+      transactionCount,
+      gasUsed: block.gasUsed,
+      gasLimit: block.gasLimit,
+      transferCount: txTypeCounts.transfer,
+      swapCount: txTypeCounts.swap,
+      mintCount: txTypeCounts.mint,
+      burnCount: txTypeCounts.burn,
+      stakeCount: txTypeCounts.stake,
+      otherCount: txTypeCounts.other,
+    },
+    timestamp: Date.now()
+  });
+
   const txList = fullBlock.transactions || [];
   for (let i = 0; i < txList.length; i++) {
     const tx = txList[i];
@@ -116,53 +96,6 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
     let txType: string;
     let contractAddress: string | null = null;
     
-    // Check if this transaction includes MON transfer (value > 0)
-    if (monAmount > 0n) {
-      // Record MON transfer
-      monTransfersList.push({
-        id: `${block.number}-${i}`,
-        transactionHash: tx.hash,
-        fromAddress: tx.from,
-        toAddress: tx.to || "0x0000000000000000000000000000000000000000",
-        amount: monAmount,
-        gasUsed,
-      });
-      
-      // Update sender stats
-      const senderStats = monWalletStats.get(tx.from);
-      if (senderStats) {
-        senderStats.totalSent += monAmount;
-        senderStats.transferCount++;
-        senderStats.sentCount++;
-      } else {
-        monWalletStats.set(tx.from, {
-          totalSent: monAmount,
-          totalReceived: 0n,
-          transferCount: 1,
-          sentCount: 1,
-          receivedCount: 0,
-        });
-      }
-      
-      // Update receiver stats (if not a contract creation)
-      if (tx.to) {
-        const receiverStats = monWalletStats.get(tx.to);
-        if (receiverStats) {
-          receiverStats.totalReceived += monAmount;
-          receiverStats.transferCount++;
-          receiverStats.receivedCount++;
-        } else {
-          monWalletStats.set(tx.to, {
-            totalSent: 0n,
-            totalReceived: monAmount,
-            transferCount: 1,
-            sentCount: 0,
-            receivedCount: 1,
-          });
-        }
-      }
-    }
-    
     // Classify transaction type
     if (monAmount > 0n && (input === "0x" || input.length <= 10)) {
       txType = "transfer";
@@ -175,189 +108,140 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       txTypeCounts[txType as keyof typeof txTypeCounts]++;
       contractAddress = tx.to;
     }
-    
-    // Track contract usage (aggregated per contract)
-    if (contractAddress) {
-      const existing = contractStats.get(contractAddress);
-      if (existing) {
-        existing.transactionCount++;
-        existing.gasUsed += gasUsed;
-      } else {
-        contractStats.set(contractAddress, {
-          transactionCount: 1,
-          gasUsed,
-          transactionType: txType,
-        });
-      }
-      
-      // Track wallet-contract interactions
-      const walletContractKey = `${walletAddress}-${contractAddress}`;
-      const existingWalletContract = walletContractStats.get(walletContractKey);
-      if (existingWalletContract) {
-        existingWalletContract.transactionCount++;
-        existingWalletContract.gasUsed += gasUsed;
-      } else {
-        walletContractStats.set(walletContractKey, {
-          transactionCount: 1,
-          gasUsed,
-          transactionType: txType,
+
+    // Emit transaction event
+    eventEmitter.emit({
+      type: 'transaction',
+      data: {
+        hash: tx.hash,
+        blockNumber: Number(block.number),
+        blockTimestamp: Number(block.timestamp),
+        transactionIndex: i,
+        fromAddress: tx.from,
+        toAddress: tx.to || "0x0000000000000000000000000000000000000000",
+        value: tx.value?.toString() || "0",
+        gasUsed: tx.gas?.toString() || "0",
+        gasPrice: tx.gasPrice?.toString() || "0",
+        transactionType: txType,
+        methodSignature: input.slice(0, 10),
+        success: true,
+        contractAddress: contractAddress || "0x0000000000000000000000000000000000000000"
+      },
+      timestamp: Date.now()
+    });
+
+    // If it's a MON transfer, emit transfer event
+    if (monAmount > 0n) {
+      eventEmitter.emit({
+        type: 'monTransfer',
+        data: {
+          id: `${block.number}-${i}`,
+          transactionHash: tx.hash,
+          fromAddress: tx.from,
+          toAddress: tx.to || "0x0000000000000000000000000000000000000000",
+          amount: monAmount,
+          gasUsed: gasUsed,
+        },
+        timestamp: Date.now()
+      });
+
+      // Update and emit wallet activity
+      eventEmitter.emit({
+        type: 'monWalletActivity',
+        data: {
+          id: `${block.number}-${tx.from}`,
+          blockNumber: block.number,
+          blockTimestamp: block.timestamp,
+          walletAddress: tx.from,
+          totalSent: monAmount,
+          totalReceived: 0n,
+          transferCount: 1,
+          sentCount: 1,
+          receivedCount: 0,
+        },
+        timestamp: Date.now()
+      });
+
+      if (tx.to) {
+        eventEmitter.emit({
+          type: 'monWalletActivity',
+          data: {
+            id: `${block.number}-${tx.to}`,
+            blockNumber: block.number,
+            blockTimestamp: block.timestamp,
+            walletAddress: tx.to,
+            totalSent: 0n,
+            totalReceived: monAmount,
+            transferCount: 1,
+            sentCount: 0,
+            receivedCount: 1,
+          },
+          timestamp: Date.now()
         });
       }
     }
-    
-    // Track wallet gas usage (per wallet across all interactions)
-    const existingWallet = walletGasStats.get(walletAddress);
-    if (existingWallet) {
-      existingWallet.totalGasUsed += gasUsed;
-      existingWallet.transactionCount++;
-      if (contractAddress) {
-        existingWallet.contractsInteracted.add(contractAddress);
-      }
-    } else {
-      const contractsSet = new Set<string>();
-      if (contractAddress) {
-        contractsSet.add(contractAddress);
-      }
-      walletGasStats.set(walletAddress, {
-        totalGasUsed: gasUsed,
-        transactionCount: 1,
-        contractsInteracted: contractsSet,
+
+    // If it's a contract interaction, emit contract usage event
+    if (contractAddress) {
+      eventEmitter.emit({
+        type: 'contractUsage',
+        data: {
+          id: `${block.number}-${contractAddress}`,
+          blockNumber: block.number,
+          blockTimestamp: block.timestamp,
+          contractAddress: contractAddress,
+          transactionCount: 1,
+          gasUsed: gasUsed,
+          avgGasPerTx: gasUsed,
+          transactionType: txType,
+        },
+        timestamp: Date.now()
+      });
+
+      // Emit wallet-contract interaction event
+      eventEmitter.emit({
+        type: 'walletContractInteraction',
+        data: {
+          id: `${block.number}-${walletAddress}-${contractAddress}`,
+          blockNumber: block.number,
+          blockTimestamp: block.timestamp,
+          walletAddress: walletAddress,
+          contractAddress: contractAddress,
+          transactionCount: 1,
+          gasUsed: gasUsed,
+          avgGasPerTx: gasUsed,
+          transactionType: txType,
+        },
+        timestamp: Date.now()
       });
     }
 
-    // Store individual transaction details
-    await db.insert(transactions).values({
-      hash: tx.hash as `0x${string}`,
-      blockNumber: block.number,
-      blockTimestamp: block.timestamp,
-      transactionIndex: i,
-      fromAddress: tx.from as `0x${string}`,
-      toAddress: (tx.to || "0x0000000000000000000000000000000000000000") as `0x${string}`,
-      value: monAmount,
-      gasUsed: gasUsed,
-      gasPrice: BigInt(tx.gasPrice || 0),
-      gasLimit: BigInt(tx.gas || 0),
-      transactionType: txType,
-      methodSignature: input.slice(0, 10),
-      inputData: input.length > 1000 ? input.slice(0, 1000) + "..." : input, // Truncate very long input data
-      success: true, // Assume success for now (we'd need receipt to determine this)
-      nonce: BigInt(tx.nonce || 0),
-      contractAddress: (contractAddress || "0x0000000000000000000000000000000000000000") as `0x${string}`,
+    // Emit wallet gas usage event
+    eventEmitter.emit({
+      type: 'walletGasUsage',
+      data: {
+        id: `${block.number}-${walletAddress}`,
+        blockNumber: block.number,
+        blockTimestamp: block.timestamp,
+        walletAddress: walletAddress,
+        totalGasUsed: gasUsed,
+        transactionCount: 1,
+        avgGasPerTx: gasUsed,
+        contractsInteracted: contractAddress ? 1 : 0,
+      },
+      timestamp: Date.now()
     });
   }
-  
-  const currentTime = new Date().toISOString();
-  const blockTime = new Date(Number(block.timestamp) * 1000).toISOString();
-  
-  // Store block with transaction type data
-  await db.insert(blocks).values({
-    number: block.number,
-    hash: block.hash,
-    timestamp: block.timestamp,
-    transactionCount,
-    gasUsed: block.gasUsed,
-    gasLimit: block.gasLimit,
-    transferCount: txTypeCounts.transfer,
-    swapCount: txTypeCounts.swap,
-    mintCount: txTypeCounts.mint,
-    burnCount: txTypeCounts.burn,
-    stakeCount: txTypeCounts.stake,
-    otherCount: txTypeCounts.other,
-  });
-  
-  // Store contract usage data
-  for (const [contractAddress, stats] of contractStats) {
-    await db.insert(contractUsage).values({
-      id: `${block.number}-${contractAddress}`,
-      blockNumber: block.number,
-      blockTimestamp: block.timestamp,
-      contractAddress: contractAddress as `0x${string}`,
-      transactionCount: stats.transactionCount,
-      gasUsed: stats.gasUsed,
-      avgGasPerTx: stats.gasUsed / BigInt(stats.transactionCount),
-      transactionType: stats.transactionType,
-    });
-  }
-  
-  // Store wallet-contract interaction data
-  for (const [walletContractKey, stats] of walletContractStats) {
-    const [walletAddress, contractAddress] = walletContractKey.split('-');
-    await db.insert(walletContractInteractions).values({
-      id: `${block.number}-${walletAddress}-${contractAddress}`,
-      blockNumber: block.number,
-      blockTimestamp: block.timestamp,
-      walletAddress: walletAddress as `0x${string}`,
-      contractAddress: contractAddress as `0x${string}`,
-      transactionCount: stats.transactionCount,
-      gasUsed: stats.gasUsed,
-      avgGasPerTx: stats.gasUsed / BigInt(stats.transactionCount),
-      transactionType: stats.transactionType,
-    });
-  }
-  
-  // Store wallet gas usage data
-  for (const [walletAddress, stats] of walletGasStats) {
-    await db.insert(walletGasUsage).values({
-      id: `${block.number}-${walletAddress}`,
-      blockNumber: block.number,
-      blockTimestamp: block.timestamp,
-      walletAddress: walletAddress as `0x${string}`,
-      totalGasUsed: stats.totalGasUsed,
-      transactionCount: stats.transactionCount,
-      avgGasPerTx: stats.totalGasUsed / BigInt(stats.transactionCount),
-      contractsInteracted: stats.contractsInteracted.size,
-    });
-  }
-  
-  // Store MON transfers
-  for (const transfer of monTransfersList) {
-    await db.insert(monTransfers).values({
-      id: transfer.id,
-      blockNumber: block.number,
-      blockTimestamp: block.timestamp,
-      transactionHash: transfer.transactionHash as `0x${string}`,
-      fromAddress: transfer.fromAddress as `0x${string}`,
-      toAddress: transfer.toAddress as `0x${string}`,
-      amount: transfer.amount,
-      gasUsed: transfer.gasUsed,
-    });
-  }
-  
-  // Store MON wallet activity
-  for (const [walletAddress, stats] of monWalletStats) {
-    await db.insert(monWalletActivity).values({
-      id: `${block.number}-${walletAddress}`,
-      blockNumber: block.number,
-      blockTimestamp: block.timestamp,
-      walletAddress: walletAddress as `0x${string}`,
-      totalSent: stats.totalSent,
-      totalReceived: stats.totalReceived,
-      transferCount: stats.transferCount,
-      sentCount: stats.sentCount,
-      receivedCount: stats.receivedCount,
-    });
-  }
-  
-  const uniqueWallets = walletGasStats.size;
-  const totalMonTransferred = monTransfersList.reduce((sum, transfer) => sum + transfer.amount, 0n);
-  const avgGasPerWallet = uniqueWallets > 0 ? Array.from(walletGasStats.values()).reduce((sum, wallet) => sum + wallet.totalGasUsed, 0n) / BigInt(uniqueWallets) : 0n;
-  
-  console.log(`📦 Block ${block.number.toLocaleString()} processed at ${currentTime}`);
-  console.log(`   ⏰ Block Time: ${blockTime}`);
-  console.log(`   📊 Transactions: ${transactionCount}`);
+
+  // Log block processing info
+  console.log(`📦 Block ${block.number.toLocaleString()} processed`);
+  console.log(`   📊 Transactions: ${txList.length}`);
   console.log(`   💸 Transfers: ${txTypeCounts.transfer}`);
   console.log(`   🔄 Swaps: ${txTypeCounts.swap}`);
   console.log(`   🏭 Mints: ${txTypeCounts.mint}`);
   console.log(`   🔥 Burns: ${txTypeCounts.burn}`);
   console.log(`   🥩 Stakes: ${txTypeCounts.stake}`);
   console.log(`   ❓ Other: ${txTypeCounts.other}`);
-  console.log(`   📋 Unique Contracts: ${contractStats.size}`);
-  console.log(`   👛 Unique Wallets: ${uniqueWallets}`);
-  console.log(`   💰 MON Transfers: ${monTransfersList.length}`);
-  console.log(`   💎 Total MON Moved: ${(Number(totalMonTransferred) / 1e18).toFixed(4)} MON`);
-  console.log(`   ⛽ Total Gas Used: ${block.gasUsed.toLocaleString()}`);
-  console.log(`   💰 Avg Gas per Wallet: ${avgGasPerWallet.toLocaleString()}`);
-  console.log(`   💡 Gas Utilization: ${((Number(block.gasUsed) / Number(block.gasLimit)) * 100).toFixed(2)}%`);
   console.log("─".repeat(60));
 });
 
