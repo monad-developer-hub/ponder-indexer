@@ -1,5 +1,5 @@
 import { ponder } from "ponder:registry";
-import { eventEmitter } from './websocket';
+import { eventEmitter, updateBlockTracking } from './websocket';
 
 // Efficient transaction type classifier based on method signatures only
 function classifyTransactionByMethodSig(input: string): string {
@@ -53,6 +53,9 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
   
   const transactionCount = fullBlock.transactions?.length || 0;
   
+  // Update block tracking for TPS calculation
+  updateBlockTracking(block.number, block.timestamp, transactionCount);
+  
   // Track transaction type counts
   const txTypeCounts = {
     transfer: 0,
@@ -70,15 +73,9 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       number: block.number,
       hash: block.hash,
       timestamp: block.timestamp,
-      transactionCount,
+      transactionCount: fullBlock.transactions.length,
       gasUsed: block.gasUsed,
-      gasLimit: block.gasLimit,
-      transferCount: txTypeCounts.transfer,
-      swapCount: txTypeCounts.swap,
-      mintCount: txTypeCounts.mint,
-      burnCount: txTypeCounts.burn,
-      stakeCount: txTypeCounts.stake,
-      otherCount: txTypeCounts.other,
+      gasLimit: block.gasLimit
     },
     timestamp: Date.now()
   });
@@ -114,18 +111,17 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       type: 'transaction',
       data: {
         hash: tx.hash,
-        blockNumber: Number(block.number),
-        blockTimestamp: Number(block.timestamp),
-        transactionIndex: i,
+        blockNumber: block.number,
+        blockTimestamp: block.timestamp,
         fromAddress: tx.from,
-        toAddress: tx.to || "0x0000000000000000000000000000000000000000",
-        value: tx.value?.toString() || "0",
-        gasUsed: tx.gas?.toString() || "0",
-        gasPrice: tx.gasPrice?.toString() || "0",
+        toAddress: tx.to || '',
+        value: tx.value,
+        gasUsed: tx.gas || 0n,
+        gasPrice: tx.gasPrice || 0n,
         transactionType: txType,
-        methodSignature: input.slice(0, 10),
+        methodSignature: tx.input.slice(0, 10),
         success: true,
-        contractAddress: contractAddress || "0x0000000000000000000000000000000000000000"
+        contractAddress: tx.to || ''
       },
       timestamp: Date.now()
     });
@@ -135,12 +131,11 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       eventEmitter.emit({
         type: 'monTransfer',
         data: {
-          id: `${block.number}-${i}`,
           transactionHash: tx.hash,
           fromAddress: tx.from,
-          toAddress: tx.to || "0x0000000000000000000000000000000000000000",
-          amount: monAmount,
-          gasUsed: gasUsed,
+          toAddress: tx.to || '',
+          amount: tx.value,
+          gasUsed: tx.gas || 0n
         },
         timestamp: Date.now()
       });
@@ -149,15 +144,12 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       eventEmitter.emit({
         type: 'monWalletActivity',
         data: {
-          id: `${block.number}-${tx.from}`,
-          blockNumber: block.number,
-          blockTimestamp: block.timestamp,
           walletAddress: tx.from,
-          totalSent: monAmount,
+          totalSent: tx.value,
           totalReceived: 0n,
           transferCount: 1,
           sentCount: 1,
-          receivedCount: 0,
+          receivedCount: 0
         },
         timestamp: Date.now()
       });
@@ -166,15 +158,12 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
         eventEmitter.emit({
           type: 'monWalletActivity',
           data: {
-            id: `${block.number}-${tx.to}`,
-            blockNumber: block.number,
-            blockTimestamp: block.timestamp,
             walletAddress: tx.to,
             totalSent: 0n,
-            totalReceived: monAmount,
+            totalReceived: tx.value,
             transferCount: 1,
             sentCount: 0,
-            receivedCount: 1,
+            receivedCount: 1
           },
           timestamp: Date.now()
         });
@@ -186,14 +175,11 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       eventEmitter.emit({
         type: 'contractUsage',
         data: {
-          id: `${block.number}-${contractAddress}`,
-          blockNumber: block.number,
-          blockTimestamp: block.timestamp,
-          contractAddress: contractAddress,
+          contractAddress: tx.to || '',
           transactionCount: 1,
-          gasUsed: gasUsed,
-          avgGasPerTx: gasUsed,
-          transactionType: txType,
+          gasUsed: tx.gas || 0n,
+          avgGasPerTx: tx.gas || 0n,
+          transactionType: txType
         },
         timestamp: Date.now()
       });
@@ -202,15 +188,12 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
       eventEmitter.emit({
         type: 'walletContractInteraction',
         data: {
-          id: `${block.number}-${walletAddress}-${contractAddress}`,
-          blockNumber: block.number,
-          blockTimestamp: block.timestamp,
-          walletAddress: walletAddress,
-          contractAddress: contractAddress,
+          walletAddress: tx.from,
+          contractAddress: tx.to || '',
           transactionCount: 1,
-          gasUsed: gasUsed,
-          avgGasPerTx: gasUsed,
-          transactionType: txType,
+          gasUsed: tx.gas || 0n,
+          avgGasPerTx: tx.gas || 0n,
+          transactionType: txType
         },
         timestamp: Date.now()
       });
@@ -220,14 +203,11 @@ ponder.on("monadBlocks:block", async ({ event, context }) => {
     eventEmitter.emit({
       type: 'walletGasUsage',
       data: {
-        id: `${block.number}-${walletAddress}`,
-        blockNumber: block.number,
-        blockTimestamp: block.timestamp,
-        walletAddress: walletAddress,
-        totalGasUsed: gasUsed,
+        walletAddress: tx.from,
+        totalGasUsed: tx.gas || 0n,
         transactionCount: 1,
-        avgGasPerTx: gasUsed,
-        contractsInteracted: contractAddress ? 1 : 0,
+        avgGasPerTx: tx.gas || 0n,
+        contractsInteracted: 1
       },
       timestamp: Date.now()
     });

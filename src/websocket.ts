@@ -1,4 +1,46 @@
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
+import { EventEmitter } from 'events';
+
+// TPS calculation configuration
+const TPS_WINDOW_BLOCKS = parseInt(process.env.TPS_WINDOW_BLOCKS || '100');
+
+// Block tracking for TPS calculation
+interface BlockInfo {
+  number: bigint;
+  timestamp: bigint;
+  transactionCount: number;
+}
+
+const recentBlocks: BlockInfo[] = [];
+
+// Function to calculate TPS
+function calculateTPS(): number {
+  if (recentBlocks.length < 2) return 0;
+  
+  const oldestBlock = recentBlocks[0];
+  const newestBlock = recentBlocks[recentBlocks.length - 1];
+  
+  if (!oldestBlock || !newestBlock) return 0;
+  
+  const timeSpan = Number(newestBlock.timestamp - oldestBlock.timestamp);
+  if (timeSpan === 0) return 0;
+  
+  // Calculate total transactions in the window
+  const totalTransactions = recentBlocks.reduce((sum, block) => sum + block.transactionCount, 0);
+  
+  // Calculate TPS: total transactions / time span in seconds
+  return totalTransactions / timeSpan;
+}
+
+// Function to update block tracking
+export function updateBlockTracking(blockNumber: bigint, timestamp: bigint, transactionCount: number) {
+  recentBlocks.push({ number: blockNumber, timestamp, transactionCount });
+  
+  // Keep only the configured window of blocks
+  while (recentBlocks.length > TPS_WINDOW_BLOCKS) {
+    recentBlocks.shift();
+  }
+}
 
 // Define event types
 export type EventType = 
@@ -8,7 +50,8 @@ export type EventType =
   | 'monWalletActivity'
   | 'contractUsage'
   | 'walletContractInteraction'
-  | 'walletGasUsage';
+  | 'walletGasUsage'
+  | 'networkStats';
 
 // Define event data types
 export interface BlockEvent {
@@ -18,24 +61,17 @@ export interface BlockEvent {
   transactionCount: number;
   gasUsed: bigint;
   gasLimit: bigint;
-  transferCount: number;
-  swapCount: number;
-  mintCount: number;
-  burnCount: number;
-  stakeCount: number;
-  otherCount: number;
 }
 
 export interface TransactionEvent {
   hash: string;
-  blockNumber: number;
-  blockTimestamp: number;
-  transactionIndex: number;
+  blockNumber: bigint;
+  blockTimestamp: bigint;
   fromAddress: string;
   toAddress: string;
-  value: string;
-  gasUsed: string;
-  gasPrice: string;
+  value: bigint;
+  gasUsed: bigint;
+  gasPrice: bigint;
   transactionType: string;
   methodSignature: string;
   success: boolean;
@@ -43,7 +79,6 @@ export interface TransactionEvent {
 }
 
 export interface MonTransferEvent {
-  id: string;
   transactionHash: string;
   fromAddress: string;
   toAddress: string;
@@ -52,9 +87,6 @@ export interface MonTransferEvent {
 }
 
 export interface MonWalletActivityEvent {
-  id: string;
-  blockNumber: bigint;
-  blockTimestamp: bigint;
   walletAddress: string;
   totalSent: bigint;
   totalReceived: bigint;
@@ -64,9 +96,6 @@ export interface MonWalletActivityEvent {
 }
 
 export interface ContractUsageEvent {
-  id: string;
-  blockNumber: bigint;
-  blockTimestamp: bigint;
   contractAddress: string;
   transactionCount: number;
   gasUsed: bigint;
@@ -75,9 +104,6 @@ export interface ContractUsageEvent {
 }
 
 export interface WalletContractInteractionEvent {
-  id: string;
-  blockNumber: bigint;
-  blockTimestamp: bigint;
   walletAddress: string;
   contractAddress: string;
   transactionCount: number;
@@ -87,14 +113,17 @@ export interface WalletContractInteractionEvent {
 }
 
 export interface WalletGasUsageEvent {
-  id: string;
-  blockNumber: bigint;
-  blockTimestamp: bigint;
   walletAddress: string;
   totalGasUsed: bigint;
   transactionCount: number;
   avgGasPerTx: bigint;
   contractsInteracted: number;
+}
+
+export interface NetworkStatsEvent {
+  currentBlockHeight: bigint;
+  tps: number;
+  windowSize: number;
 }
 
 export type EventData = 
@@ -104,22 +133,13 @@ export type EventData =
   | MonWalletActivityEvent
   | ContractUsageEvent
   | WalletContractInteractionEvent
-  | WalletGasUsageEvent;
+  | WalletGasUsageEvent
+  | NetworkStatsEvent;
 
 export interface Event {
   type: EventType;
   data: EventData;
   timestamp: number;
-}
-
-// Custom JSON serializer that handles BigInt
-function serializeWithBigInt(obj: any): string {
-  return JSON.stringify(obj, (key, value) => {
-    if (typeof value === 'bigint') {
-      return value.toString();
-    }
-    return value;
-  });
 }
 
 // Custom event emitter class
@@ -153,12 +173,55 @@ class MonadEventEmitter {
 // Create event emitter instance
 export const eventEmitter = new MonadEventEmitter();
 
+// Helper to serialize BigInt values
+function serializeWithBigInt(obj: any): string {
+  return JSON.stringify(obj, (_, value) =>
+    typeof value === 'bigint' ? value.toString() : value
+  );
+}
+
 // Create WebSocket server
 const wss = new WebSocketServer({ port: 8080 });
+
+// Track client subscriptions
+const clientSubscriptions = new Map<WebSocket, Set<EventType>>();
+
+// Broadcast network stats every second
+setInterval(() => {
+  if (recentBlocks.length > 0) {
+    const latestBlock = recentBlocks[recentBlocks.length - 1];
+    if (latestBlock) {
+      const networkStats: NetworkStatsEvent = {
+        currentBlockHeight: latestBlock.number,
+        tps: calculateTPS(),
+        windowSize: TPS_WINDOW_BLOCKS
+      };
+
+      const event: Event = {
+        type: 'networkStats',
+        data: networkStats,
+        timestamp: Date.now()
+      };
+
+      // Broadcast to all clients subscribed to networkStats
+      wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          const subscriptions = clientSubscriptions.get(client);
+          if (subscriptions?.has('networkStats')) {
+            client.send(serializeWithBigInt(event));
+          }
+        }
+      });
+    }
+  }
+}, 1000);
 
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
   console.log('New WebSocket client connected');
+  
+  // Initialize empty subscriptions set for this client
+  clientSubscriptions.set(ws, new Set());
 
   // Handle client messages
   ws.on('message', (message) => {
@@ -168,17 +231,20 @@ wss.on('connection', (ws) => {
       // Handle subscription requests
       if (data.type === 'subscribe') {
         const eventTypes = Array.isArray(data.events) ? data.events : [data.events];
+        const subscriptions = clientSubscriptions.get(ws) || new Set();
         
-        // Subscribe to requested event types
+        // Add new subscriptions
         eventTypes.forEach((eventType: EventType) => {
-          eventEmitter.on(eventType, (event: Event) => {
-            if (ws.readyState === ws.OPEN) {
-              ws.send(serializeWithBigInt(event));
-            }
-          });
+          subscriptions.add(eventType);
         });
         
-        ws.send(JSON.stringify({ type: 'subscribed', events: eventTypes }));
+        clientSubscriptions.set(ws, subscriptions);
+        
+        // Send confirmation
+        ws.send(JSON.stringify({ 
+          type: 'subscribed', 
+          events: Array.from(subscriptions)
+        }));
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
@@ -188,9 +254,49 @@ wss.on('connection', (ws) => {
   // Handle client disconnection
   ws.on('close', () => {
     console.log('WebSocket client disconnected');
-    // Remove all listeners for this client
-    eventEmitter.removeAllListeners();
+    clientSubscriptions.delete(ws);
   });
 });
+
+// Handle events from the indexer
+eventEmitter.on('block', (event: Event) => {
+  broadcastEvent(event);
+});
+
+eventEmitter.on('transaction', (event: Event) => {
+  broadcastEvent(event);
+});
+
+eventEmitter.on('monTransfer', (event: Event) => {
+  broadcastEvent(event);
+});
+
+eventEmitter.on('monWalletActivity', (event: Event) => {
+  broadcastEvent(event);
+});
+
+eventEmitter.on('contractUsage', (event: Event) => {
+  broadcastEvent(event);
+});
+
+eventEmitter.on('walletContractInteraction', (event: Event) => {
+  broadcastEvent(event);
+});
+
+eventEmitter.on('walletGasUsage', (event: Event) => {
+  broadcastEvent(event);
+});
+
+// Helper function to broadcast events to subscribed clients
+function broadcastEvent(event: Event) {
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      const subscriptions = clientSubscriptions.get(client);
+      if (subscriptions?.has(event.type)) {
+        client.send(serializeWithBigInt(event));
+      }
+    }
+  });
+}
 
 console.log('WebSocket server started on port 8080'); 
