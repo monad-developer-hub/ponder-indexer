@@ -121,7 +121,7 @@ export interface WalletGasUsageEvent {
 }
 
 export interface NetworkStatsEvent {
-  currentBlockHeight: bigint;
+  blockNumber: bigint;
   tps: number;
   windowSize: number;
 }
@@ -192,7 +192,7 @@ setInterval(() => {
     const latestBlock = recentBlocks[recentBlocks.length - 1];
     if (latestBlock) {
       const networkStats: NetworkStatsEvent = {
-        currentBlockHeight: latestBlock.number,
+        blockNumber: latestBlock.number,
         tps: calculateTPS(),
         windowSize: TPS_WINDOW_BLOCKS
       };
